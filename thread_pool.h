@@ -14,17 +14,23 @@ typedef struct _thnode{
 	int efd; /* event fd */
 	pthread_spinlock_t qlock; /* queue lock */
 	void (*result_cb)(void* arg);
+	struct _thpool* thp;
+
+	int id;
 }thnode_t;
 typedef struct _thpool
 {
 	int thread_num;
 	thnode_t ** threads;
+	int efd;
+	queue_t* q;
+	pthread_spinlock_t qlock;
 }thpool_t;
 /* thnode API */
-thnode_t* thread_create(void(*result_cb)(void*arg) );
+thnode_t* thread_create( );
 void thread_destroy(thnode_t* );
 /* thpool_t API */
-thpool_t* thread_pool_alloc(int num, void(*result_cb)(void*arg));
+thpool_t* thread_pool_alloc(int num);
 /* schedule_task would allocate task to a thread with least jobs */
 void thread_pool_schedule_task(thpool_t* thp, void*(*)(void*), void* arg);
 /* assign_task assigns task to specified thread */

@@ -20,6 +20,7 @@ typedef struct _qelement_t
 void* kill_task(void* arg)
 {
 	thnode_t* th = (thnode_t*)arg;
+	printf("%s(%d)\n",__func__,th->id);
 	/* pool would free the thread resource */
 	th->active = 0;
 	return NULL;
@@ -29,15 +30,22 @@ void* kill_task(void* arg)
 static void* do_task(void* arg)
 {
 	int i;
-	int s;
-	uint64_t u;
+	uint64_t ur;
+	uint64_t uw;
 	void* r;
+    	ssize_t s;
+
 	thnode_t* th = (thnode_t*)arg;		
 	qelement_t * qe;
 	while(th->active){
-		s = read(th->efd, &u, sizeof(uint64_t));
-        	if (s != sizeof(uint64_t)) handle_error("read");
-        	for(i = 0; th->active && i< u ; i++){
+		printf("read %d\n",th->id);
+		s = read(th->efd, &ur, sizeof(uint64_t));
+		printf("read %d done\n",th->id);
+        	if (s != sizeof(uint64_t)){
+			th->active = 0;
+			continue;
+		}
+        	for(i = 0; th->active && i< ur ; i++){
 			pthread_spin_lock(&th->qlock);
 				qe = (qelement_t*) queue_pop( th->q); 
 			pthread_spin_unlock(&th->qlock);
@@ -49,17 +57,27 @@ static void* do_task(void* arg)
 				if(qe->task == NULL) fprintf(stderr,"null task\n");
 				else{
 					r=qe->task(qe->arg);
-					if(r && th->result_cb){
-						th->result_cb(r);
+					if(r){
+						pthread_spin_lock(&th->thp->qlock);
+						  queue_push( th->thp->q,r); 
+						pthread_spin_unlock(&th->thp->qlock);
+
+						uw = 1;
+						/* write is thread safe */
+    						s = write(th->thp->efd, &uw, sizeof(uint64_t));
+    						if (s != sizeof(uint64_t)) handle_error("write");
 					}			
 				}
 				free(qe);
 			}
 		}
-	}	
+	}
+	
+	
+	printf("leave ...\n");	
 	return NULL;
 }
-thnode_t* thread_create(void (*result_cb)(void* arg) )
+thnode_t* thread_create( )
 {
 	int s;
 	thnode_t* th;
@@ -75,7 +93,6 @@ thnode_t* thread_create(void (*result_cb)(void* arg) )
 	if(pthread_spin_init(&th->qlock,0)!=0) handle_error("pthread_spin_init");
 
 	th->active = 1;
-	th->result_cb = result_cb;
 	s = pthread_create(&th->pth,NULL,do_task,(void*)th);
 	if(s != 0) handle_error("pthread_create");
 	
@@ -89,7 +106,7 @@ void thread_destroy(thnode_t* th)
 	queue_free(th->q);
 	free(th);
 }
-thpool_t* thread_pool_alloc(int num,void(*result_cb)(void*arg) )
+thpool_t* thread_pool_alloc(int num )
 {
 	thpool_t *thp;
 	int i;
@@ -101,7 +118,20 @@ thpool_t* thread_pool_alloc(int num,void(*result_cb)(void*arg) )
 	thp->threads = malloc( sizeof( thnode_t) * num );
 	
 	if(!thp->threads)return NULL;
-	for(i = 0;i<num ; i++) thp->threads[i] = thread_create(result_cb);
+	for(i = 0;i<num ; i++){
+		thp->threads[i] = thread_create();
+		thp->threads[i]->thp = thp;
+		thp->threads[i]->id = i;
+	}
+
+	thp->q = queue_alloc();
+	if(!thp->q)handle_error("malloc queue_t");
+	
+	thp->efd = eventfd(0,0);
+        if(thp->efd == -1) handle_error("eventfd");
+
+        if(pthread_spin_init(&thp->qlock,0)!=0) handle_error("pthread_spin_init");
+
 	return thp;
 }
 /* 
@@ -125,6 +155,7 @@ void thread_pool_schedule_task(thpool_t* thp, void*(*task)(void*), void* arg)
 
 void thread_pool_assign_task(thpool_t* thp, void*(*task)(void*), void* arg,int no)
 {
+	printf("%s(%d)\n",__func__,no);
 	thnode_t* th = (thnode_t*)thp->threads[no];
 	uint64_t u;
     ssize_t s;
@@ -139,22 +170,31 @@ void thread_pool_assign_task(thpool_t* thp, void*(*task)(void*), void* arg,int n
 	pthread_spin_unlock(&th->qlock);
 
 	u = 1;
-    s = write(th->efd, &u, sizeof(uint64_t));
-    if (s != sizeof(uint64_t)) handle_error("write");
-	printf("add task to %d\n",no);	
+    	s = write(th->efd, &u, sizeof(uint64_t));
+    	if (s != sizeof(uint64_t)) handle_error("write");
+//	printf("add task to %d\n",no);	
 }
 
 void thread_pool_destroy(thpool_t* thp)
 {
 	int i;
 	/* send kill task to all threads  */
+
 	for(i= 0;i<thp->thread_num ; i++){
 		thread_pool_assign_task(thp,kill_task,(void*)thp->threads[i],i);
 	}
+
 	for(i = 0;i<thp->thread_num ; i++){
+		printf("pending task for thread (%d) : %d\n",i,thp->threads[i]->q->number);
+//		pthread_kill( thp->threads[i]->pth);
+		/* close fd first , so that thread won't block on reading */
 		pthread_join( thp->threads[i]->pth,NULL);
 		thread_destroy(thp->threads[i]);
+		printf("thread %d is destroyed\n",i);
 	}
+	pthread_spin_destroy(&thp->qlock);
+        close(thp->efd);
+        queue_free(thp->q);
 	free(thp->threads);
 	free(thp);
 } 
