@@ -13,7 +13,6 @@ typedef struct _thnode{
 	int active; 
 	int efd; /* event fd */
 	pthread_spinlock_t qlock; /* queue lock */
-	void (*result_cb)(void* arg);
 	struct _thpool* thp;
 
 	int id;
